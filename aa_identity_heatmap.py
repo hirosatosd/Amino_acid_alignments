@@ -1,286 +1,153 @@
-#!/usr/bin/env python3
-"""
-Amino Acid Percent Identity Heatmap Generator - Jupyter Notebook Version
-This script calculates pairwise amino acid identity and creates a heatmap visualization.
-"""
-
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 import seaborn as sns
-from Bio import SeqIO, AlignIO
-from Bio.Seq import Seq
-from Bio.SeqRecord import SeqRecord
-from pathlib import Path
+from Bio import SeqIO, pairwise2
 import warnings
 warnings.filterwarnings('ignore')
 
 # Set up matplotlib for Jupyter
 %matplotlib inline
-plt.style.use('default')
-sns.set_palette("husl")
 
-def calculate_pairwise_identity(seq1, seq2):
-    """
-    Calculate percent identity between two aligned sequences.
-    Gaps are ignored in the calculation.
-    """
+def simple_pairwise_align(seq1, seq2):
+    """Simple pairwise alignment using Biopython."""
+    alignments = pairwise2.align.globalxx(seq1, seq2)
+    if alignments:
+        return alignments[0][0], alignments[0][1]
+    else:
+        # Fallback: pad shorter sequence
+        if len(seq1) < len(seq2):
+            return seq1 + '-' * (len(seq2) - len(seq1)), seq2
+        else:
+            return seq1, seq2 + '-' * (len(seq1) - len(seq2))
+
+def calculate_identity(seq1, seq2):
+    """Calculate percent identity between two sequences."""
+    original_seq1, original_seq2 = seq1, seq2
+    
+    # Align sequences if they're different lengths
     if len(seq1) != len(seq2):
-        raise ValueError("Sequences must be the same length (aligned)")
+        seq1, seq2 = simple_pairwise_align(seq1, seq2)
     
     matches = 0
-    valid_positions = 0
+    mismatches = 0
+    gaps = 0
     
     for a, b in zip(seq1, seq2):
-        if a != '-' and b != '-':  # Skip gaps
-            valid_positions += 1
-            if a == b:
-                matches += 1
+        if a == '-' or b == '-':  # Gap in either sequence
+            gaps += 1
+        elif a == b:  # Match
+            matches += 1
+        else:  # Mismatch
+            mismatches += 1
     
-    if valid_positions == 0:
-        return 0.0
+    total_positions = len(seq1)
+    valid_positions = matches + mismatches  # Non-gap positions
     
-    return (matches / valid_positions) * 100
+    # Calculate identity as matches / total alignment length (more stringent)
+    # This penalizes gaps appropriately
+    identity_total = (matches / total_positions) * 100
+    
+    # Also calculate traditional identity (matches / valid positions)
+    identity_valid = (matches / valid_positions) * 100 if valid_positions > 0 else 0.0
+    
+    # Use the more conservative measure for very gappy alignments
+    gap_fraction = gaps / total_positions
+    
+    if gap_fraction > 0.5:  # If more than 50% gaps, use total-based identity
+        final_identity = identity_total
+        method = "total-based"
+    else:
+        final_identity = identity_valid
+        method = "valid-based"
+    
+    # Debug output for troubleshooting
+    if len(original_seq1) != len(original_seq2):
+        print(f"  Original lengths: {len(original_seq1)}, {len(original_seq2)}")
+        print(f"  Aligned lengths: {len(seq1)}, {len(seq2)}")
+        print(f"  Matches: {matches}, Mismatches: {mismatches}, Gaps: {gaps}")
+        print(f"  Gap fraction: {gap_fraction:.2f}")
+        print(f"  Identity (valid-based): {identity_valid:.1f}%")
+        print(f"  Identity (total-based): {identity_total:.1f}%")
+        print(f"  Final identity ({method}): {final_identity:.1f}%")
+        print(f"  First 50 chars of alignment:")
+        print(f"  Seq1: {seq1[:50]}")
+        print(f"  Seq2: {seq2[:50]}")
+        print()
+    
+    return final_identity
 
-def read_sequences_from_fasta(fasta_file):
-    """Read sequences from FASTA file."""
+def make_heatmap(fasta_file, title="AA Identity Heatmap", figsize=(10, 8)):
+    """
+    Simple function to create identity heatmap from FASTA file.
+    Handles both aligned and unaligned sequences.
+    """
+    
+    # Read sequences
+    print(f"Reading sequences from {fasta_file}...")
     sequences = {}
     for record in SeqIO.parse(fasta_file, "fasta"):
         sequences[record.id] = str(record.seq)
-    return sequences
-
-def read_sequences_from_alignment(alignment_file, format="fasta"):
-    """Read sequences from alignment file."""
-    sequences = {}
-    alignment = AlignIO.read(alignment_file, format)
-    for record in alignment:
-        sequences[record.id] = str(record.seq)
-    return sequences
-
-def create_identity_matrix(sequences):
-    """Create pairwise identity matrix from sequences."""
-    seq_ids = list(sequences.keys())
-    n = len(seq_ids)
     
-    print(f"Calculating pairwise identities for {n} sequences...")
+    seq_names = list(sequences.keys())
+    n = len(seq_names)
+    print(f"Found {n} sequences")
     
-    # Initialize matrix
+    # Calculate identity matrix
+    print("Calculating pairwise identities...")
     identity_matrix = np.zeros((n, n))
     
-    # Calculate pairwise identities
     for i in range(n):
         for j in range(n):
             if i == j:
-                identity_matrix[i, j] = 100.0  # Self-identity is 100%
+                identity_matrix[i, j] = 100.0
             else:
-                identity = calculate_pairwise_identity(
-                    sequences[seq_ids[i]], 
-                    sequences[seq_ids[j]]
-                )
+                identity = calculate_identity(sequences[seq_names[i]], sequences[seq_names[j]])
                 identity_matrix[i, j] = identity
     
-    return pd.DataFrame(identity_matrix, index=seq_ids, columns=seq_ids)
-
-def create_heatmap(identity_df, figsize=(12, 10), title="Amino Acid Identity Heatmap", 
-                  save_file=None, show_values=True, colormap='RdYlBu_r'):
-    """Create and display heatmap in Jupyter."""
+    # Create DataFrame
+    identity_df = pd.DataFrame(identity_matrix, index=seq_names, columns=seq_names)
     
+    # Plot heatmap
     plt.figure(figsize=figsize)
-    
-    # Create heatmap
     sns.heatmap(
         identity_df, 
-        annot=show_values, 
+        annot=True, 
         fmt='.1f',
-        cmap=colormap,
+        cmap='RdYlBu_r',
         center=50,
-        vmin=0,
-        vmax=100,
         square=True,
-        linewidths=0.5,
-        cbar_kws={'label': 'Percent Identity (%)'},
-        annot_kws={'size': 8}
+        cbar_kws={'label': 'Identity (%)'}
     )
     
-    plt.title(title, fontsize=16, pad=20)
-    plt.xlabel('Sequences', fontsize=12)
-    plt.ylabel('Sequences', fontsize=12)
+    plt.title(title, fontsize=14)
     plt.xticks(rotation=45, ha='right')
     plt.yticks(rotation=0)
     plt.tight_layout()
-    
-    if save_file:
-        plt.savefig(save_file, dpi=300, bbox_inches='tight')
-        print(f"Heatmap saved to: {save_file}")
-    
     plt.show()
     
-    return plt.gcf()
-
-def read_diamond_output(diamond_file):
-    """
-    Read DIAMOND output and create identity matrix.
-    Expects tab-delimited format with columns: qseqid, sseqid, pident
-    """
-    df = pd.read_csv(diamond_file, sep='\t', header=None)
+    # Print stats
+    upper_tri = identity_df.values[np.triu_indices_from(identity_df.values, k=1)]
     
-    # Assume standard DIAMOND output format
-    if df.shape[1] >= 3:
-        df.columns = ['qseqid', 'sseqid', 'pident'] + [f'col_{i}' for i in range(3, df.shape[1])]
+    # Check alignment lengths
+    seq_lengths = [len(seq) for seq in sequences.values()]
+    original_lengths = {name: len(sequences[name]) for name in seq_names}
+    
+    print(f"\nSequence Info:")
+    print(f"Original lengths: {dict(list(original_lengths.items())[:5])}{'...' if len(original_lengths) > 5 else ''}")
+    if len(set(seq_lengths)) == 1:
+        print(f"All sequences aligned to length: {seq_lengths[0]}")
     else:
-        raise ValueError("DIAMOND file must have at least 3 columns (qseqid, sseqid, pident)")
+        print(f"Variable lengths: {set(seq_lengths)}")
     
-    # Create pivot table for identity matrix
-    identity_pivot = df.pivot_table(
-        index='qseqid', 
-        columns='sseqid', 
-        values='pident', 
-        fill_value=0
-    )
+    print(f"\nIdentity Stats:")
+    print(f"Mean identity: {upper_tri.mean():.1f}%")
+    print(f"Min identity: {upper_tri.min():.1f}%")
+    print(f"Max identity: {upper_tri.max():.1f}%")
     
-    # Make symmetric matrix (add reverse matches if missing)
-    all_seqs = set(identity_pivot.index) | set(identity_pivot.columns)
-    identity_matrix = pd.DataFrame(0.0, index=all_seqs, columns=all_seqs)
-    
-    # Fill in the values
-    for idx in identity_pivot.index:
-        for col in identity_pivot.columns:
-            val = identity_pivot.loc[idx, col]
-            identity_matrix.loc[idx, col] = val
-            identity_matrix.loc[col, idx] = val  # Make symmetric
-    
-    # Set diagonal to 100 (self-identity)
-    for seq in all_seqs:
-        identity_matrix.loc[seq, seq] = 100.0
-    
-    return identity_matrix
+    return identity_df
 
-def analyze_sequences(input_file, input_format='fasta', title="AA Identity Heatmap", 
-                     figsize=(12, 10), save_file=None, show_values=True, 
-                     colormap='RdYlBu_r'):
-    """
-    Main function to analyze sequences and create heatmap.
-    Perfect for Jupyter notebook usage.
-    
-    Parameters:
-    -----------
-    input_file : str
-        Path to input file
-    input_format : str
-        Format of input file ('fasta', 'clustal', 'phylip', 'diamond')
-    title : str
-        Title for the heatmap
-    figsize : tuple
-        Figure size (width, height)
-    save_file : str
-        Optional file to save the plot
-    show_values : bool
-        Whether to show identity values on heatmap
-    colormap : str
-        Colormap for heatmap
-    
-    Returns:
-    --------
-    identity_df : pandas.DataFrame
-        Matrix of pairwise identities
-    """
-    
-    try:
-        if input_format == 'diamond':
-            print("Reading DIAMOND output...")
-            identity_df = read_diamond_output(input_file)
-        else:
-            print(f"Reading sequences from {input_format} file...")
-            if input_format == 'fasta':
-                sequences = read_sequences_from_fasta(input_file)
-            else:
-                sequences = read_sequences_from_alignment(input_file, input_format)
-            
-            # Check if sequences are aligned
-            seq_lengths = [len(seq) for seq in sequences.values()]
-            if len(set(seq_lengths)) > 1:
-                print("WARNING: Sequences have different lengths. Are they aligned?")
-                print(f"Sequence lengths: {dict(zip(sequences.keys(), seq_lengths))}")
-            
-            identity_df = create_identity_matrix(sequences)
-        
-        print("Creating heatmap...")
-        fig = create_heatmap(identity_df, figsize, title, save_file, show_values, colormap)
-        
-        # Print summary statistics
-        upper_triangle = identity_df.values[np.triu_indices_from(identity_df.values, k=1)]
-        
-        print("\n" + "="*50)
-        print("SUMMARY STATISTICS")
-        print("="*50)
-        print(f"Number of sequences: {len(identity_df)}")
-        print(f"Mean identity: {upper_triangle.mean():.2f}%")
-        print(f"Median identity: {np.median(upper_triangle):.2f}%")
-        print(f"Min identity: {upper_triangle.min():.2f}%")
-        print(f"Max identity: {upper_triangle.max():.2f}%")
-        print(f"Standard deviation: {upper_triangle.std():.2f}%")
-        
-        # Show identity distribution
-        plt.figure(figsize=(10, 4))
-        
-        plt.subplot(1, 2, 1)
-        plt.hist(upper_triangle, bins=20, alpha=0.7, edgecolor='black')
-        plt.xlabel('Percent Identity (%)')
-        plt.ylabel('Frequency')
-        plt.title('Distribution of Pairwise Identities')
-        plt.grid(True, alpha=0.3)
-        
-        plt.subplot(1, 2, 2)
-        plt.boxplot(upper_triangle)
-        plt.ylabel('Percent Identity (%)')
-        plt.title('Identity Distribution')
-        plt.grid(True, alpha=0.3)
-        
-        plt.tight_layout()
-        plt.show()
-        
-        return identity_df
-        
-    except Exception as e:
-        print(f"Error: {e}")
-        return None
-
-# Convenience function for quick analysis
-def quick_heatmap(fasta_file, title=None):
-    """Quick heatmap generation from FASTA file."""
-    if title is None:
-        title = f"Identity Heatmap - {Path(fasta_file).name}"
-    
-    return analyze_sequences(fasta_file, title=title)
-
-# Example usage functions for Jupyter
-def example_usage():
-    """Print example usage for Jupyter notebooks."""
-    print("EXAMPLE USAGE IN JUPYTER:")
-    print("="*40)
-    print()
-    print("# Basic usage:")
-    print("identity_matrix = analyze_sequences('alignment.fasta')")
-    print()
-    print("# With custom parameters:")
-    print("identity_matrix = analyze_sequences(")
-    print("    'alignment.fasta',")
-    print("    title='My Protein Family',")
-    print("    figsize=(15, 12),")
-    print("    save_file='heatmap.png',")
-    print("    colormap='viridis'")
-    print(")")
-    print()
-    print("# Quick analysis:")
-    print("identity_matrix = quick_heatmap('alignment.fasta')")
-    print()
-    print("# From DIAMOND output:")
-    print("identity_matrix = analyze_sequences('diamond_output.txt', input_format='diamond')")
-    print()
-    print("# Access the data:")
-    print("print(identity_matrix.head())")
-    print("print(identity_matrix.loc['seq1', 'seq2'])  # Get specific identity")
-
-# Display example usage when imported
-print("AA Identity Heatmap Generator - Jupyter Ready!")
-print("Call example_usage() to see usage examples.")
+# Usage example:
+# identity_matrix = make_heatmap('your_sequences.fasta')
+print("Simple AA Identity Heatmap ready!")
+print("Usage: identity_matrix = make_heatmap('your_file.fasta')")
